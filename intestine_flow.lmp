@@ -1,0 +1,119 @@
+#1 - initialisation
+dimension 3
+atom_style hybrid bond sph
+units si
+newton on
+boundary p p p
+
+#2 - read system
+read_data intestine.initial
+
+variable	       dL	    equal 0.006283185307180
+variable	       h	    equal 2.*${dL}
+variable	       cut	    equal 1.*${dL}
+variable           c        equal 0.005 # soundspeed for Tait's EOS
+variable	       rho	    equal 1000
+variable	       alpha    equal 1 # 1. for default viscosity 
+variable	       kB	    equal 0.5
+variable           dt       equal 0.002 
+
+#variables for intestine movement
+
+variable	f0	equal -1.e-3
+
+variable	L	    equal 0.6283185307180 # = 100*dL
+variable	N		equal 10.
+variable	Dz		equal ${L}/${N}
+
+#Create a continuous peristalsis instead of sections
+variable    vel_peri        equal 0. #how quick the peristalsis will propogate
+
+variable    z0_initial      equal ${Dz}%${L}
+variable	z1_initial		equal (2.)*${Dz}%${L}
+variable	z2_initial		equal (3.)*${Dz}%${L}
+variable	R	            equal 0.025
+
+variable    actual_current_step     equal step
+variable    current_step            equal step
+
+variable    z0      equal v_z0_initial+(v_vel_peri*${dt}*v_current_step)
+variable    z1      equal v_z1_initial+(v_vel_peri*${dt}*v_current_step)
+variable    z2      equal v_z2_initial+(v_vel_peri*${dt}*v_current_step)
+
+group	wall  type 1
+group	fluid type 2
+
+pair_style hybrid/overlay sph/rhosum 1 sph/taitwater soft ${cut} zero ${cut} 
+pair_coeff 1 1 zero
+pair_coeff 1 2 soft 3.e-6 
+pair_coeff 2 2 soft 1.e-9 #artificial pressure 
+pair_coeff * 2 sph/taitwater ${rho} ${c} ${alpha} ${h}
+pair_coeff 2 2 sph/rhosum ${h}
+
+bond_style	harmonic
+bond_coeff	1 ${kB} ${dL}
+
+#section that is squeezed (push) z0<z<z1
+variable PP atom ((v_z0<v_z1)|^((z>=v_z0)|^(z<=v_z1)))*gmask(wall)
+
+#section that senses (sense) z1<z<z2
+variable SS atom ((v_z1<v_z2)|^((z>v_z1)|^(z<=v_z2)))*gmask(wall)
+
+#the remaining section (rigid)  
+variable RR atom ((v_z0>v_z2)|^((z>v_z0)|^(z<v_z2)))*gmask(wall)
+
+group 	push    dynamic wall var PP every 1
+group 	sense   dynamic wall var SS  every 1
+
+variable rDist   atom sqrt(x^2+y^2)
+variable cosQ    atom x/v_rDist
+variable sinQ    atom y/v_rDist 
+variable squeeze_factor  atom (v_rDist/${R})^2. 
+
+variable FP atom ${f0}*gmask(push)  
+variable Fx atom v_FP*v_cosQ*v_squeeze_factor
+variable Fy atom v_FP*v_sinQ*v_squeeze_factor
+
+###the following only because spring/self cannot be dynamic####
+fix x0 wall store/state 0 x
+fix y0 wall store/state 0 y
+fix z0 wall store/state 0 z
+fix zu wall store/state 0 zu
+variable varX atom (f_x0-x)*gmask(wall)
+variable varY atom (f_y0-y)*gmask(wall)
+#variable varZ atom (f_z0-f_zu)*gmask(wall)
+#variable varP atom sqrt(varX^2+varY^2+varZ^2)
+variable KR  equal 0.1 #rigid section
+variable FRx atom v_RR*${KR}*v_varX
+variable FRy atom v_RR*${KR}*v_varY
+#variable FRz atom v_RR*${KR}*v_varZ
+#################################################################
+
+fix 10  all     sph
+fix 20  wall    viscous 0.01
+fix 30  wall    addforce v_Fx v_Fy 0.
+fix 40  wall    addforce v_FRx v_FRy 0.
+fix 50  wall    setforce NULL NULL 0.
+
+# time-integrate position, velocities, internal energy and density of water particles
+#fix                integrate_fluid_fix fluid sph
+
+# time-integrate only internal energy and density of boundary particles
+#fix                integrate_wall_fix wall sph
+
+#compute  rho_peratom all    sph/rho/atom
+#compute  stretch     wall   pe/atom bond
+compute  com         fluid  com
+variable r_stretch   atom   gmask(sense)*((v_rDist-${R})/${R})*(v_rDist>${R}) 
+compute  eps sense   reduce ave v_r_stretch
+
+#dump               dump_id all custom 10 flow_by_intestine.lammpstrj id type xs ys zs vx vy vz v_r_stretch
+#dump_modify        dump_id first yes
+#thermo             50
+thermo_style	   custom step time c_com[3]
+thermo_modify	   norm no
+
+variable           skin equal 0.3*${h}
+neighbor           ${skin} bin # set Verlet list skin distance
+
+timestep	       ${dt}
